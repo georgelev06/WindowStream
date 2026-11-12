@@ -594,14 +594,14 @@ img{display:block;width:100%;height:100%;object-fit:contain}
 </style>
 </head>
 <body><img src="/stream" alt="Live window broadcast"></body>
-</html>"""
+</html>""".encode("utf-8")
 
 
 def page_for(title):
     """Page in the selected language; the browser tab title equals the streamed window's title."""
     page = PAGE.decode("utf-8")
     if title:
-        page = page.replace("<title>Map</title>", f"<title>{html.escape(title)}</title>", 1)
+        page = page.replace("<title>WindowStream</title>", f"<title>{html.escape(title)}</title>", 1)
     page = page.replace("@@lang@@", LANG)
     page = re.sub(r"@@(\w+)@@", lambda m: html.escape(T("web_" + m.group(1)), quote=True), page)
     return page.encode("utf-8")
