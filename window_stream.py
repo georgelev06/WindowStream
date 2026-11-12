@@ -2,7 +2,7 @@ r"""
 window_stream.py - streams the contents of a Windows window to a browser (MJPEG over HTTP)
 with a system tray icon.
 
-Install:      pip install pywin32 pillow mss pystray numpy PyTurboJPEG
+Install:      pip install -r requirements.txt
              (on Windows TurboJPEG also needs the libjpeg-turbo library)
 List windows: python window_stream.py --list
 Run:          python window_stream.py                 (pick the window in the tray menu)
@@ -37,7 +37,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO, StringIO
 from typing import Callable, NamedTuple
 
-import mss
 import pystray
 
 try:
@@ -47,7 +46,6 @@ except ImportError:
 import win32con
 import win32gui
 import win32process
-import win32ui
 from PIL import Image, ImageDraw
 
 # Fast JPEG encoding via libjpeg-turbo. If unavailable, fall back to Pillow.
@@ -89,7 +87,7 @@ I18N = {
         "no_window_selected": "No window selected: choose one in the tray menu (\"Window\" item)",
         "window_not_found": "Window \"{title}\" not found",
         "port_failed": "Could not open port {port}: {err}",
-        "broadcast_started": "Broadcast started: {title!r}, mode {mode}",
+        "broadcast_started": "Broadcast started: {title!r}",
         "broadcast_stopped": "Broadcast stopped",
         "capture_error": "Capture error:",
         "state_stopped": "stopped", "state_running": "live", "state_paused": "paused",
@@ -108,9 +106,7 @@ I18N = {
         "help_fps": "maximum frames per second (default 10)",
         "help_quality": "JPEG quality 1-95 (default 75)",
         "help_scale": "frame scale, e.g. 0.5 (default 1.0)",
-        "help_mode": "windowscapture - capture the selected window independently of desktop occlusion; "
-                     "printwindow - legacy off-screen capture; screen - copy visible desktop pixels",
-        "help_no_autostart": "do not start broadcasting at launch, wait for a menu command",
+            "help_no_autostart": "do not start broadcasting at launch, wait for a menu command",
         "help_no_diff": "disable frame change detection: encode and send every frame",
         "help_no_turbo": "do not use TurboJPEG, encode with Pillow (for comparison)",
         "help_config": "path to the settings file",
@@ -157,7 +153,7 @@ I18N = {
         "no_window_selected": "Окно не выбрано: выберите его в меню трея (пункт «Окно»)",
         "window_not_found": "Окно «{title}» не найдено",
         "port_failed": "Не удалось открыть порт {port}: {err}",
-        "broadcast_started": "Трансляция запущена: {title!r}, режим {mode}",
+        "broadcast_started": "Трансляция запущена: {title!r}",
         "broadcast_stopped": "Трансляция остановлена",
         "capture_error": "Ошибка захвата:",
         "state_stopped": "остановлена", "state_running": "идёт", "state_paused": "на паузе",
@@ -176,8 +172,6 @@ I18N = {
         "help_fps": "максимум кадров в секунду (по умолчанию 10)",
         "help_quality": "качество JPEG 1-95 (по умолчанию 75)",
         "help_scale": "масштаб кадра, напр. 0.5 (по умолчанию 1.0)",
-        "help_mode": "screen - копия с экрана (окно должно быть не перекрыто); "
-                     "printwindow - захват даже перекрытого окна (не у всех приложений работает)",
         "help_no_autostart": "не начинать трансляцию при запуске, ждать команды из меню",
         "help_no_diff": "отключить проверку изменения кадра: кодировать и отправлять каждый кадр",
         "help_no_turbo": "не использовать TurboJPEG, кодировать через Pillow (для сравнения)",
@@ -371,44 +365,6 @@ def find_window(substr, process=None):
 
 
 # ---------- capture ----------
-def grab_screen(hwnd, sct):
-    """Copies the window area from the screen. The window must be visible and not covered."""
-    _, _, w, h = win32gui.GetClientRect(hwnd)
-    if w <= 0 or h <= 0:
-        return None
-    x, y = win32gui.ClientToScreen(hwnd, (0, 0))
-    shot = sct.grab({"left": x, "top": y, "width": w, "height": h})
-    data = shot.raw if hasattr(shot, "raw") else shot.bgra  # raw BGRA buffer without copying
-    return data, shot.size
-
-
-def grab_printwindow(hwnd):
-    """Asks the window itself to render into a bitmap. Works for covered windows too,
-    but not for every application (some GPU apps produce a black frame)."""
-    _, _, w, h = win32gui.GetClientRect(hwnd)
-    if w <= 0 or h <= 0:
-        return None
-    wdc = win32gui.GetWindowDC(hwnd)
-    mfc = win32ui.CreateDCFromHandle(wdc)
-    save = mfc.CreateCompatibleDC()
-    bmp = win32ui.CreateBitmap()
-    try:
-        bmp.CreateCompatibleBitmap(mfc, w, h)
-        save.SelectObject(bmp)
-        # 1 = PW_CLIENTONLY, 2 = PW_RENDERFULLCONTENT
-        ok = ctypes.windll.user32.PrintWindow(hwnd, save.GetSafeHdc(), 3)
-        if not ok:
-            return None
-        info = bmp.GetInfo()
-        bits = bmp.GetBitmapBits(True)
-        return bits, (info["bmWidth"], info["bmHeight"])
-    finally:
-        win32gui.DeleteObject(bmp.GetHandle())
-        save.DeleteDC()
-        mfc.DeleteDC()
-        win32gui.ReleaseDC(hwnd, wdc)
-
-
 # ---------- shared frame buffer ----------
 class FrameBuffer:
     def __init__(self):
@@ -471,114 +427,75 @@ def encode_jpeg(data, size, args):
 
 
 def capture_loop(args, hwnd, title, buf, stop, paused, stats):
-    if args.mode == "windowscapture":
-        if WindowsCapture is None:
-            print("Windows Graphics Capture unavailable; install windows-capture. Falling back to PrintWindow.")
-            args.mode = "printwindow"
-        else:
-            while not stop.is_set():
-                if not win32gui.IsWindow(hwnd):
-                    found = find_window(args.title, args.process)
-                    if not found:
-                        stop.wait(1)
-                        continue
-                    hwnd, title = found
-                    stats["hwnd"] = hwnd
-                if win32gui.IsIconic(hwnd) or paused.is_set():
-                    stop.wait(0.2)
+    """Capture only the selected window using Windows Graphics Capture."""
+    if WindowsCapture is None:
+        print("Windows Graphics Capture unavailable; install windows-capture.")
+        return
+
+    while not stop.is_set():
+        if not win32gui.IsWindow(hwnd):
+            found = find_window(args.title, args.process)
+            if not found:
+                stop.wait(1)
+                continue
+            hwnd, title = found
+            stats["hwnd"] = hwnd
+
+        # A minimised window cannot reliably provide frames through Windows Graphics Capture.
+        if win32gui.IsIconic(hwnd) or paused.is_set():
+            stop.wait(0.2)
+            continue
+
+        latest = [None]
+        frame_ready = threading.Event()
+        capture_closed = threading.Event()
+        control = None
+        try:
+            capture = WindowsCapture(
+                cursor_capture=False,
+                draw_border=False,
+                window_hwnd=int(hwnd),
+                minimum_update_interval=max(1, int(1000 / args.fps)),
+            )
+
+            @capture.event
+            def on_frame_arrived(frame, capture_control):
+                latest[0] = (frame.frame_buffer.tobytes(), (frame.width, frame.height), time.time())
+                frame_ready.set()
+
+            @capture.event
+            def on_closed():
+                capture_closed.set()
+
+            control = capture.start_free_threaded()
+            last_crc = None
+            while not stop.is_set() and not capture_closed.is_set():
+                if paused.is_set() or win32gui.IsIconic(hwnd):
+                    break
+                if not frame_ready.wait(0.2):
+                    continue
+                frame_ready.clear()
+                item = latest[0]
+                if item is None:
                     continue
 
-                latest = [None]
-                frame_ready = threading.Event()
-                capture_closed = threading.Event()
+                data, size, captured_at = item
+                stats["grabs"] += 1
+                crc = None if args.no_diff else zlib.crc32(data)
+                if args.no_diff or crc != last_crc:
+                    last_crc = crc
+                    buf.publish(encode_jpeg(data, size, args), captured_at)
+                    stats["frames"] += 1
+        except Exception as e:
+            print(T("capture_error"), e)
+            stop.wait(0.5)
+        finally:
+            if control is not None:
                 try:
-                    capture = WindowsCapture(
-                        cursor_capture=False,
-                        draw_border=False,
-                        window_hwnd=int(hwnd),
-                        minimum_update_interval=max(1, int(1000 / args.fps)),
-                    )
-
-                    @capture.event
-                    def on_frame_arrived(frame, capture_control):
-                        # Copy the mapped GPU frame before the native callback releases it.
-                        latest[0] = (frame.frame_buffer.tobytes(), (frame.width, frame.height), time.time())
-                        frame_ready.set()
-
-                    @capture.event
-                    def on_closed():
-                        capture_closed.set()
-
-                    control = capture.start_free_threaded()
-                    last_crc = None
-                    while not stop.is_set() and not capture_closed.is_set():
-                        if paused.is_set():
-                            frame_ready.wait(0.2)
-                            frame_ready.clear()
-                            continue
-                        if not frame_ready.wait(0.2):
-                            continue
-                        frame_ready.clear()
-                        item = latest[0]
-                        if item is None:
-                            continue
-                        data, size, captured_at = item
-                        stats["grabs"] += 1
-                        crc = None if args.no_diff else zlib.crc32(data)
-                        if args.no_diff or crc != last_crc:
-                            last_crc = crc
-                            buf.publish(encode_jpeg(data, size, args), captured_at)
-                            stats["frames"] += 1
                     control.stop()
                     control.wait()
-                except Exception as e:
-                    print(T("capture_error"), e)
-                    stop.wait(0.5)
-            return
-
-    interval = 1.0 / args.fps
-    last_crc = None
-    MSS = getattr(mss, "MSS", None) or mss.mss  # mss.mss is deprecated in newer versions
-    with MSS() as sct:  # mss must be created in the thread where it is used
-        while not stop.is_set():
-            t0 = time.time()
-            try:
-                if paused.is_set():  # paused - the last frame stays on the tablet screen
-                    stop.wait(0.2)
-                    continue
-                if not win32gui.IsWindow(hwnd):
-                    found = find_window(args.title, args.process)
-                    if found:
-                        hwnd, title = found
-                        stats["hwnd"] = hwnd
-                    else:
-                        stop.wait(1)
-                        continue
-                if win32gui.IsIconic(hwnd):  # minimized - keep the last frame
-                    stop.wait(0.5)
-                    continue
-
-                frame = grab_printwindow(hwnd) if args.mode == "printwindow" else grab_screen(hwnd, sct)
-                if frame is None:
-                    stop.wait(0.2)
-                    continue
-                data, size = frame
-                stats["grabs"] += 1
-
-                # crc32 is computed directly on the raw buffer; the Pillow image is created only when needed
-                crc = None if args.no_diff else zlib.crc32(data)
-                if args.no_diff or crc != last_crc:  # encode only when the picture has changed
-                    last_crc = crc
-                    buf.publish(encode_jpeg(data, size, args), t0)
-                    stats["frames"] += 1
-            except Exception as e:
-                print(T("capture_error"), e)
-                stop.wait(0.5)
-
-            delay = interval - (time.time() - t0)
-            if delay > 0:
-                stop.wait(delay)
-
+                except Exception:
+                    pass
 
 # ---------- HTTP ----------
 PAGE = r"""<!doctype html>
@@ -744,7 +661,7 @@ class Broadcaster:
             for t in self.threads:
                 t.start()
             self.state = RUNNING
-        print(T("broadcast_started", title=title, mode=self.args.mode))
+        print(T("broadcast_started", title=title))
         self.on_change()
         return None
 
@@ -848,7 +765,6 @@ SETTINGS = {
     "crop_top": _S(0, int, from_file=True),
     "crop_right": _S(0, int, from_file=True),
     "crop_bottom": _S(0, int, from_file=True),
-    "mode": _S("windowscapture", str, from_file=True),  # windowscapture, printwindow or screen
     "no_diff": _S(False, _to_bool),
     "no_turbo": _S(False, _to_bool),
     "autostart_broadcast": _S(True, _to_bool, saved=False),  # start broadcasting when the program starts
@@ -880,8 +796,6 @@ def load_settings(path):
                 s[key] = spec.cast(data[key])
             except (TypeError, ValueError):
                 print(T("setting_invalid", key=key))
-    if s["mode"] not in ("screen", "printwindow", "windowscapture"):
-        s["mode"] = DEFAULT_SETTINGS["mode"]
     s["language"] = str(s["language"]).strip().lower()
     if s["language"] not in I18N:
         s["language"] = "en"
@@ -1080,7 +994,6 @@ def main():
     p.add_argument("--crop-top", type=int, default=None, help="Pixels to crop from the top")
     p.add_argument("--crop-right", type=int, default=None, help="Pixels to crop from the right")
     p.add_argument("--crop-bottom", type=int, default=None, help="Pixels to crop from the bottom")
-    p.add_argument("--mode", choices=["windowscapture", "screen", "printwindow"], default=None, help=T("help_mode"))
     p.add_argument("--no-autostart", action="store_true", help=T("help_no_autostart"))
     p.add_argument("--no-diff", action="store_true", help=T("help_no_diff"))
     p.add_argument("--no-turbo", action="store_true", help=T("help_no_turbo"))
@@ -1213,14 +1126,6 @@ def main():
         args.title, args.process = w["title"], w["process"]
         settings["title"], settings["process"] = args.title, args.process
         save_settings(cfg_path, settings)
-        # Only screen mode needs the selected window brought to the foreground.
-        if args.mode == "screen":
-            try:
-                was_min = win32gui.IsIconic(w["hwnd"])
-                bring_to_front(w["hwnd"])
-                time.sleep(0.4 if was_min else 0.15)
-            except Exception:
-                pass
         bc.stop()
         err = bc.start()
         if err:
