@@ -1,7 +1,6 @@
 # WindowStream runtime dependencies (Windows only)
 pywin32
 pillow
-mss
 pystray
 numpy
 PyTurboJPEG
