@@ -442,18 +442,25 @@ class FrameBuffer:
 
 
 def encode_jpeg(data, size, args):
-    """Encodes a raw BGRX frame to JPEG. TurboJPEG if available, otherwise Pillow."""
+    """Crop, optionally scale, and JPEG-encode a captured BGRX frame."""
     w, h = size
+    left, top = args.crop_left, args.crop_top
+    right, bottom = args.crop_right, args.crop_bottom
+    cropped = any((left, top, right, bottom))
+    if min(left, top, right, bottom) < 0 or left + right >= w or top + bottom >= h:
+        raise ValueError("Crop values remove the entire captured window")
+
     use_turbo = _turbo is not None and not args.no_turbo
-    if use_turbo and args.scale == 1.0:
-        # Fast path: mss buffer straight into the encoder, no Pillow
+    if use_turbo and args.scale == 1.0 and not cropped:
         arr = np.frombuffer(data, np.uint8).reshape(h, w, 4)
         return _turbo.encode(arr, quality=args.quality, pixel_format=TJPF_BGRX, flags=TJFLAG_FASTDCT)
 
     img = Image.frombuffer("RGB", size, data, "raw", "BGRX", 0, 1)
+    if cropped:
+        img = img.crop((left, top, w - right, h - bottom))
     if args.scale != 1.0:
         img = img.resize(
-            (max(1, int(w * args.scale)), max(1, int(h * args.scale))),
+            (max(1, int(img.width * args.scale)), max(1, int(img.height * args.scale))),
             Image.BILINEAR,
         )
     if use_turbo:
@@ -575,387 +582,19 @@ def capture_loop(args, hwnd, title, buf, stop, paused, stats):
 
 # ---------- HTTP ----------
 PAGE = r"""<!doctype html>
-<html lang="@@lang@@"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#0a0d12">
-<title>Map</title>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WindowStream</title>
 <style>
-:root{--pad:6px;--bezel:6px;--accent:#8b95a5;--glow:rgba(139,149,165,.22);--edge:#3a4250}
-body[data-state=running]{--accent:#2fcf7a;--glow:rgba(47,207,122,.30);--edge:#2a7a51}
-body[data-state=paused]{--accent:#f5a623;--glow:rgba(245,166,35,.30);--edge:#9a6b1a}
-body[data-state=offline]{--accent:#e5484d;--glow:rgba(229,72,77,.30);--edge:#8f3a3d}
 *{box-sizing:border-box}
-html,body{margin:0;height:100%;overflow:hidden;background:#0a0d12;
-  background-image:radial-gradient(ellipse at 50% 35%,#171d27 0%,#0a0d12 70%);
-  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#e8ecf2;
-  touch-action:none;overscroll-behavior:none;
-  -webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
-.stage{position:fixed;inset:0;padding:var(--pad)}
-.frame{width:100%;height:100%;padding:var(--bezel);border-radius:20px;
-  background:linear-gradient(145deg,#2b323e,#141920);
-  border:1px solid var(--edge);
-  box-shadow:0 0 0 1px rgba(0,0,0,.7),0 0 30px var(--glow);
-  transition:border-color .4s,box-shadow .4s}
-.screen{position:relative;width:100%;height:100%;border-radius:13px;overflow:hidden;
-  background:#000;isolation:isolate}
-.screen::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:1;
-  box-shadow:inset 0 0 0 1px rgba(255,255,255,.06),inset 0 0 30px rgba(0,0,0,.35)}
-
-/* Image layer: scaled and moved with fingers */
-.view{position:absolute;inset:0;transform-origin:0 0;touch-action:none;will-change:transform}
-.view.anim{transition:transform .28s cubic-bezier(.2,.8,.2,1)}
-.view img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none;
-  -webkit-user-drag:none;transition:filter .4s}
-body[data-state=paused] .view img{filter:saturate(.55) brightness(.7)}
-body[data-state=offline] .view img{filter:grayscale(1) brightness(.4) blur(2px)}
-
-/* Mode badge (top right) and buttons: auto-hide */
-.badge{position:absolute;top:12px;right:12px;z-index:3;display:flex;align-items:center;gap:8px;
-  padding:7px 13px 7px 11px;border-radius:999px;background:rgba(9,12,17,.72);
-  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
-  border:1px solid rgba(255,255,255,.12);font-weight:600;font-size:12px;line-height:1;
-  letter-spacing:.09em;text-transform:uppercase;pointer-events:none;
-  opacity:0;transition:opacity .35s}
-body.ui .badge,body:not([data-state=running]) .badge{opacity:1}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent)}
-body[data-state=running] .dot{animation:pulse 1.8s ease-out infinite}
-@keyframes pulse{
-  0%{box-shadow:0 0 0 0 var(--glow),0 0 8px var(--accent)}
-  70%{box-shadow:0 0 0 9px transparent,0 0 8px var(--accent)}
-  100%{box-shadow:0 0 0 0 transparent,0 0 8px var(--accent)}}
-.stats{display:flex;align-items:center;gap:8px;font-weight:500;letter-spacing:.03em;
-  text-transform:none;color:#aab3c0;font-variant-numeric:tabular-nums}
-.stats::before{content:"";width:1px;height:12px;background:rgba(255,255,255,.18)}
-body:not([data-state=running]) .stats,body.nostats .stats{display:none}
-
-.iconbtn{position:absolute;top:8px;left:12px;z-index:3;width:38px;height:38px;padding:0;border-radius:50%;
-  border:1px solid rgba(255,255,255,.12);background:rgba(9,12,17,.72);color:#e8ecf2;
-  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
-  display:flex;align-items:center;justify-content:center;
-  opacity:0;pointer-events:none;transition:opacity .35s}
-body.ui .iconbtn{opacity:1;pointer-events:auto}
-
-.zoom{position:absolute;right:12px;bottom:12px;z-index:3;display:none;padding:7px 13px;border-radius:999px;
-  background:rgba(9,12,17,.72);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
-  border:1px solid rgba(255,255,255,.12);font-size:12px;font-weight:600;letter-spacing:.04em;
-  font-variant-numeric:tabular-nums;cursor:pointer}
-.zoom.on{display:block}
-
-/* No connection */
-.overlay{position:absolute;inset:0;z-index:2;display:none;flex-direction:column;align-items:center;
-  justify-content:center;gap:12px;text-align:center;color:#c9d1dc;font-size:16px;letter-spacing:.03em;
-  pointer-events:none}
-.overlay small{font-size:13px;color:#8b95a5}
-body[data-state=offline] .overlay{display:flex}
-.spinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(255,255,255,.15);
-  border-top-color:var(--accent);animation:spin 1s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-@media (max-width:600px){.badge{top:8px;right:8px;font-size:11px;padding:6px 11px 6px 9px}}
-</style></head>
-<body data-state="offline">
-<div class="stage"><div class="frame"><div class="screen" id="screen">
-  <div class="view" id="view"><img id="v" alt=""></div>
-  <div class="overlay"><div class="spinner"></div><div>@@offline_title@@</div>
-    <small>@@offline_sub@@</small></div>
-  <button class="iconbtn" id="fs" aria-label="@@fullscreen@@">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-      stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
-  </button>
-  <div class="badge"><span class="dot"></span><span id="label">@@no_link@@</span>
-    <span class="stats" id="stats">— fps · — @@ms@@</span></div>
-  <div class="zoom" id="zoom">×1.0 · @@reset@@</div>
-</div></div></div>
-<script>
-(() => {
-'use strict';
-const $ = id => document.getElementById(id);
-const screenEl = $('screen'), view = $('view'), img = $('v'), label = $('label'),
-      statsEl = $('stats'), zoomEl = $('zoom'), fsBtn = $('fs');
-const LABELS = {running: '@@running@@', paused: '@@paused@@', offline: '@@no_link@@'};
-let state = 'offline';
-
-/* ---------- UI auto-hide ---------- */
-let uiTimer = null;
-function showUI() {
-  document.body.classList.add('ui');
-  clearTimeout(uiTimer);
-  // During normal streaming the UI hides; on pause or connection loss it stays visible
-  if (state === 'running') uiTimer = setTimeout(() => document.body.classList.remove('ui'), 4000);
-}
-
-/* ---------- Show/hide fps and latency (long press) ---------- */
-let nostats = false;
-try { nostats = localStorage.getItem('nostats') === '1'; } catch (e) {}
-document.body.classList.toggle('nostats', nostats);
-function toggleStats() {
-  nostats = !nostats;
-  document.body.classList.toggle('nostats', nostats);
-  try { localStorage.setItem('nostats', nostats ? '1' : '0'); } catch (e) {}
-  if (navigator.vibrate) navigator.vibrate(30);
-  showUI();
-}
-
-/* ---------- Zoom and pan ---------- */
-const MAX = 8;
-let s = 1, tx = 0, ty = 0;
-const rect = () => screenEl.getBoundingClientRect();
-function clampT() {
-  const r = rect();
-  tx = Math.min(0, Math.max(r.width - r.width * s, tx));
-  ty = Math.min(0, Math.max(r.height - r.height * s, ty));
-}
-function apply() {
-  view.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + s + ')';
-  const z = s > 1.02;
-  zoomEl.classList.toggle('on', z);
-  if (z) zoomEl.textContent = '×' + s.toFixed(1) + ' · @@reset@@';
-}
-function animate() {
-  view.classList.add('anim');
-  setTimeout(() => view.classList.remove('anim'), 320);
-}
-function zoomAt(x, y, ns) {
-  ns = Math.min(MAX, Math.max(1, ns));
-  const r = rect();
-  const cx = (x - r.left - tx) / s, cy = (y - r.top - ty) / s;
-  tx = x - r.left - cx * ns;
-  ty = y - r.top - cy * ns;
-  s = ns;
-  clampT();
-  apply();
-}
-function resetZoom() { animate(); s = 1; tx = 0; ty = 0; apply(); }
-
-const pts = new Map();
-let g = null, press = null, lpTimer = null, lastTap = null;
-
-function baseline() {
-  const a = [...pts.values()];
-  if (a.length === 1) g = {type: 'pan', x: a[0].x, y: a[0].y, tx: tx, ty: ty};
-  else if (a.length >= 2) {
-    g = {type: 'pinch', d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1,
-         mx: (a[0].x + a[1].x) / 2, my: (a[0].y + a[1].y) / 2, s: s, tx: tx, ty: ty};
-  } else g = null;
-}
-
-function handleTap(x, y) {
-  const now = performance.now();
-  if (lastTap && now - lastTap.t < 320 && Math.hypot(x - lastTap.x, y - lastTap.y) < 40) {
-    lastTap = null;
-    if (s > 1.05) resetZoom(); else { animate(); zoomAt(x, y, 2.5); }
-  } else {
-    lastTap = {t: now, x: x, y: y};
-    showUI();
-  }
-}
-
-view.addEventListener('pointerdown', e => {
-  try { view.setPointerCapture(e.pointerId); } catch (_) {}
-  pts.set(e.pointerId, {x: e.clientX, y: e.clientY});
-  view.classList.remove('anim');
-  if (pts.size === 1) {
-    press = {t: performance.now(), x: e.clientX, y: e.clientY, moved: false, multi: false, long: false};
-    clearTimeout(lpTimer);
-    lpTimer = setTimeout(() => {
-      if (press && !press.moved && !press.multi) { press.long = true; toggleStats(); }
-    }, 700);
-  } else if (press) {
-    press.multi = true;
-    clearTimeout(lpTimer);
-  }
-  baseline();
-});
-
-view.addEventListener('pointermove', e => {
-  const p = pts.get(e.pointerId);
-  if (!p) return;
-  p.x = e.clientX; p.y = e.clientY;
-  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) {
-    press.moved = true;
-    clearTimeout(lpTimer);
-  }
-  if (!g) return;
-  if (g.type === 'pinch' && pts.size >= 2) {
-    const a = [...pts.values()];
-    const d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1;
-    const mx = (a[0].x + a[1].x) / 2, my = (a[0].y + a[1].y) / 2;
-    const r = rect();
-    const ns = Math.min(MAX, Math.max(1, g.s * d / g.d));
-    const cx = (g.mx - r.left - g.tx) / g.s, cy = (g.my - r.top - g.ty) / g.s;
-    s = ns;
-    tx = mx - r.left - cx * ns;
-    ty = my - r.top - cy * ns;
-    clampT();
-    apply();
-  } else if (g.type === 'pan' && s > 1) {
-    tx = g.tx + (e.clientX - g.x);
-    ty = g.ty + (e.clientY - g.y);
-    clampT();
-    apply();
-  }
-});
-
-function endPointer(e) {
-  if (!pts.has(e.pointerId)) return;
-  pts.delete(e.pointerId);
-  clearTimeout(lpTimer);
-  if (pts.size === 0) {
-    if (press && e.type === 'pointerup' && !press.moved && !press.multi && !press.long &&
-        performance.now() - press.t < 300) handleTap(e.clientX, e.clientY);
-    press = null;
-    g = null;
-  } else baseline();
-}
-view.addEventListener('pointerup', endPointer);
-view.addEventListener('pointercancel', endPointer);
-view.addEventListener('contextmenu', e => e.preventDefault());
-// Mouse wheel - for testing from a regular computer
-view.addEventListener('wheel', e => {
-  e.preventDefault();
-  zoomAt(e.clientX, e.clientY, s * Math.exp(-e.deltaY * 0.0015));
-}, {passive: false});
-
-zoomEl.addEventListener('click', resetZoom);
-fsBtn.addEventListener('click', () => {
-  const d = document;
-  if (d.fullscreenElement) d.exitFullscreen();
-  else if (d.documentElement.requestFullscreen) d.documentElement.requestFullscreen();
-  showUI();
-});
-window.addEventListener('resize', () => { clampT(); apply(); });
-
-/* ---------- Frame stream (MJPEG parsed manually: fps and latency are needed) ---------- */
-let frames = 0, lat = null, offset = null, lastSeq = -1, curUrl = null;
-const samples = [];
-const dec = new TextDecoder('ascii');
-
-function concat(a, b) {
-  if (!a.length) return b;
-  const c = new Uint8Array(a.length + b.length);
-  c.set(a);
-  c.set(b, a.length);
-  return c;
-}
-function findHeaderEnd(b) {
-  for (let i = 0; i <= b.length - 4; i++) {
-    if (b[i] === 13 && b[i + 1] === 10 && b[i + 2] === 13 && b[i + 3] === 10) return i;
-  }
-  return -1;
-}
-function show(jpeg) {
-  const url = URL.createObjectURL(new Blob([jpeg], {type: 'image/jpeg'}));
-  const prev = curUrl;
-  curUrl = url;
-  img.src = url;
-  if (prev) setTimeout(() => URL.revokeObjectURL(prev), 1500);
-}
-
-let streamCtl = null;
-function stopStream() {
-  if (streamCtl) { streamCtl.abort(); streamCtl = null; }
-}
-async function startStream() {
-  stopStream();
-  const ctl = new AbortController();
-  streamCtl = ctl;
-  lastSeq = -1;
-  let last = performance.now();
-  // The server sends a frame at least every 5 s; longer silence means a dropped connection
-  const wd = setInterval(() => { if (performance.now() - last > 12000) ctl.abort(); }, 2000);
-  try {
-    const resp = await fetch('/stream?t=' + Date.now(), {signal: ctl.signal, cache: 'no-store'});
-    if (!resp.ok || !resp.body) throw new Error('stream');
-    const reader = resp.body.getReader();
-    let buf = new Uint8Array(0);
-    for (;;) {
-      const r = await reader.read();
-      if (r.done) break;
-      last = performance.now();
-      buf = concat(buf, r.value);
-      let latest = null;
-      for (;;) {
-        const h = findHeaderEnd(buf);
-        if (h < 0) break;
-        const head = dec.decode(buf.subarray(0, h));
-        const m = /Content-Length:\s*(\d+)/i.exec(head);
-        if (!m) { buf = buf.subarray(h + 4); continue; }
-        const end = h + 4 + parseInt(m[1], 10);
-        if (buf.length < end) break;
-        const sm = /X-Seq:\s*(\d+)/i.exec(head), tm = /X-Ts:\s*([\d.]+)/i.exec(head);
-        const seq = sm ? parseInt(sm[1], 10) : -2;
-        // A frame with the same number is a keep-alive; do not display it again
-        if (!sm || seq !== lastSeq) {
-          lastSeq = seq;
-          frames++;
-          latest = {jpeg: buf.slice(h + 4, end), ts: tm ? parseFloat(tm[1]) : null};
-        }
-        buf = buf.subarray(end);
-      }
-      if (latest) {
-        show(latest.jpeg);
-        if (latest.ts != null && offset != null) {
-          const l = Math.max(0, Date.now() - latest.ts + offset);
-          lat = lat == null ? l : lat * 0.7 + l * 0.3;
-        }
-      }
-    }
-  } catch (e) {}
-  finally {
-    clearInterval(wd);
-    if (streamCtl === ctl) {
-      streamCtl = null;
-      if (state !== 'offline') {
-        setTimeout(() => { if (!streamCtl && state !== 'offline') startStream(); }, 1500);
-      }
-    }
-  }
-}
-
-/* ---------- State and server polling ---------- */
-function setState(ns) {
-  if (ns === state) return;
-  const was = state;
-  state = ns;
-  document.body.dataset.state = ns;
-  label.textContent = LABELS[ns];
-  if (ns === 'offline') stopStream();
-  else if (was === 'offline') startStream();
-  showUI();
-}
-
-async function poll() {
-  const t0 = Date.now();
-  try {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 2500);
-    const r = await fetch('/status', {cache: 'no-store', signal: ctl.signal});
-    const j = await r.json();
-    clearTimeout(timer);
-    const rtt = Date.now() - t0;
-    if (typeof j.t === 'number') {
-      // Clock offset between PC and tablet: take the measurement with the lowest round-trip time
-      samples.push({rtt: rtt, off: j.t - (t0 + rtt / 2)});
-      if (samples.length > 30) samples.shift();
-      offset = samples.reduce((m, x) => x.rtt < m.rtt ? x : m).off;
-    }
-    setState(j.state === 'paused' ? 'paused' : 'running');
-    // The browser tab is named after the streamed window (the title may change)
-    if (j.title && document.title !== j.title) document.title = j.title;
-  } catch (e) {
-    setState('offline');
-  }
-}
-setInterval(poll, 1000);
-poll();
-
-setInterval(() => {
-  const fps = frames;
-  frames = 0;
-  statsEl.textContent = fps + ' fps · ' + (lat == null ? '—' : Math.round(lat) + ' @@ms@@');
-}, 1000);
-})();
-</script>
-</body></html>""".encode("utf-8")
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#000}
+img{display:block;width:100%;height:100%;object-fit:contain}
+</style>
+</head>
+<body><img src="/stream" alt="Live window broadcast"></body>
+</html>"""
 
 
 def page_for(title):
@@ -1205,6 +844,10 @@ SETTINGS = {
     "fps": _S(10.0, float, from_file=True),
     "quality": _S(75, int, from_file=True),
     "scale": _S(1.0, float, from_file=True),
+    "crop_left": _S(0, int, from_file=True),
+    "crop_top": _S(0, int, from_file=True),
+    "crop_right": _S(0, int, from_file=True),
+    "crop_bottom": _S(0, int, from_file=True),
     "mode": _S("windowscapture", str, from_file=True),  # windowscapture, printwindow or screen
     "no_diff": _S(False, _to_bool),
     "no_turbo": _S(False, _to_bool),
@@ -1433,6 +1076,10 @@ def main():
     p.add_argument("--fps", type=float, default=None, help=T("help_fps"))
     p.add_argument("--quality", type=int, default=None, help=T("help_quality"))
     p.add_argument("--scale", type=float, default=None, help=T("help_scale"))
+    p.add_argument("--crop-left", type=int, default=None, help="Pixels to crop from the left")
+    p.add_argument("--crop-top", type=int, default=None, help="Pixels to crop from the top")
+    p.add_argument("--crop-right", type=int, default=None, help="Pixels to crop from the right")
+    p.add_argument("--crop-bottom", type=int, default=None, help="Pixels to crop from the bottom")
     p.add_argument("--mode", choices=["windowscapture", "screen", "printwindow"], default=None, help=T("help_mode"))
     p.add_argument("--no-autostart", action="store_true", help=T("help_no_autostart"))
     p.add_argument("--no-diff", action="store_true", help=T("help_no_diff"))
