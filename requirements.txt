@@ -5,6 +5,7 @@ mss
 pystray
 numpy
 PyTurboJPEG
+windows-capture
 
 # Only needed to build the standalone exe (build_exe.bat installs it itself)
 # pyinstaller
