@@ -13,7 +13,7 @@ On the tablet: http://<PC-address>:8080/
 Settings are stored in %APPDATA%\WindowStream\settings.json (created on first run).
 Command-line options take precedence over the file; --save writes them to the file.
 Interface language: English by default; set "language": "ru" in the settings file for Russian.
-Tray menu: Start / Pause / Stop broadcast, window selection, autostart with Windows, Exit.
+Tray menu: Exit.
 Standalone exe build: build_exe.bat (PyInstaller).
 View-only: the client cannot control anything.
 """
@@ -1101,99 +1101,12 @@ def main():
                 warned = True
             cancel_auto.wait(5)
 
-    def do_start(icon_=None, item=None):
-        cancel_auto.set()
-        err = bc.start()
-        if err:
-            notify(err, T("error_title"))
-        else:
-            notify(T("open_on_tablet", url=get_url()), T("broadcast_started_title"))
-
-    def do_pause(icon_=None, item=None):
-        bc.toggle_pause()
-
-    def do_stop(icon_=None, item=None):
-        cancel_auto.set()
-        bc.stop()
-
     def do_exit(icon_=None, item=None):
         cancel_auto.set()
         bc.stop()
         icon.stop()
 
-    def select_window(w):
-        cancel_auto.set()
-        args.title, args.process = w["title"], w["process"]
-        settings["title"], settings["process"] = args.title, args.process
-        save_settings(cfg_path, settings)
-        bc.stop()
-        err = bc.start()
-        if err:
-            notify(err, T("error_title"))
-        else:
-            notify(T("streaming", title=w["title"], url=get_url()), T("broadcast_started_title"))
-        refresh()
-
-    def make_select(w):
-        def action(icon_, item):
-            select_window(w)
-        return action
-
-    def make_checked(w):
-        return lambda item: w["title"] == args.title and (not args.process or w["process"] == args.process)
-
-    def windows_menu():
-        items = [
-            pystray.MenuItem(menu_text(w["title"]), make_select(w), checked=make_checked(w), radio=True)
-            for w in app_windows()[:40]
-        ]
-        if not items:
-            items = [pystray.MenuItem(T("no_windows"), lambda icon_, item: None, enabled=False)]
-        return items
-
-    def window_label(item=None):
-        return T("window_label", title=menu_text(args.title, 30) if args.title else T("not_selected"))
-
-    def do_toggle_autostart(icon_=None, item=None):
-        try:
-            enable = not autostart_enabled()
-            set_autostart(enable, autostart_command(cfg_path))
-            notify(T("autostart_on") if enable else T("autostart_off"))
-        except Exception as e:
-            notify(T("autostart_failed", err=e), T("error_title"))
-        icon.update_menu()
-
-    def do_open_settings(icon_=None, item=None):
-        try:
-            if not os.path.exists(cfg_path):
-                save_settings(cfg_path, settings)
-            subprocess.Popen(["notepad.exe", cfg_path])
-        except Exception as e:
-            notify(T("settings_open_failed", err=e), T("error_title"))
-
-    def do_raise(icon_=None, item=None):
-        found = find_window(args.title, args.process)
-        if found:
-            bring_to_front(found[0])
-        else:
-            notify(T("window_not_found", title=args.title), T("error_title"))
-
     menu = pystray.Menu(
-        pystray.MenuItem(T("menu_start"), do_start, enabled=lambda i: bc.state == STOPPED),
-        pystray.MenuItem(
-            lambda i: T("menu_resume") if bc.state == PAUSED else T("menu_pause"),
-            do_pause,
-            enabled=lambda i: bc.state != STOPPED,
-        ),
-        pystray.MenuItem(T("menu_stop"), do_stop, enabled=lambda i: bc.state != STOPPED),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem(window_label, pystray.Menu(windows_menu)),
-        pystray.MenuItem(T("menu_raise"), do_raise, enabled=lambda i: bool(args.title)),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem(T("menu_autostart"), do_toggle_autostart,
-                         checked=lambda i: autostart_enabled()),
-        pystray.MenuItem(T("menu_settings"), do_open_settings),
-        pystray.Menu.SEPARATOR,
         pystray.MenuItem(T("menu_exit"), do_exit),
     )
     icon = TrayIcon("window_stream", make_icon_image(STOPPED), T("tip_title", state=T("state_stopped")), menu)
