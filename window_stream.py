@@ -29,6 +29,7 @@ import re
 import socket
 import subprocess
 import sys
+import shutil
 import threading
 import time
 import winreg
@@ -776,8 +777,21 @@ CLI_VALUE_SETTINGS = tuple(k for k, v in SETTINGS.items() if v.from_file)
 
 
 def default_config_path():
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "WindowStream", "settings.json")
+    # Keep settings beside each running copy so separate folders can run independently.
+    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, "settings.json")
+
+    # One-time migration from the previous per-user location.
+    legacy_base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    legacy_path = os.path.join(legacy_base, "WindowStream", "settings.json")
+    if not os.path.exists(path) and os.path.isfile(legacy_path):
+        try:
+            shutil.copy2(legacy_path, path)
+        except OSError:
+            # If the application folder is read-only, continue using the existing file.
+            return legacy_path
+
+    return path
 
 
 def load_settings(path):
